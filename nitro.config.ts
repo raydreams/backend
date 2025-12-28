@@ -1,4 +1,5 @@
 import { config } from 'dotenv';
+import { resolve } from 'path';
 config();
 import { version } from './server/utils/config';
 //https://nitro.unjs.io/config
@@ -33,5 +34,18 @@ export default defineNitroConfig({
       clientId: process.env.TRAKT_CLIENT_ID,
       clientSecret: process.env.TRAKT_SECRET_ID,
     },
+  },
+  rollupConfig: {
+    plugins: [
+      {
+        name: 'resolve-pg-native',
+        resolveId(id) {
+          if (id === 'pg-native') {
+            return resolve(process.cwd(), 'server/utils/pg-native-stub.js');
+          }
+          return null;
+        },
+      },
+    ],
   },
 });
