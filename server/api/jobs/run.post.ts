@@ -30,4 +30,4 @@ export default defineEventHandler(async (event) => {
       statusMessage: `Failed to run job: ${error.message || 'Unknown error'}`
     });
   }
-});
+}); 
