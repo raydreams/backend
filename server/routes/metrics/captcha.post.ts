@@ -1,19 +1,16 @@
 import { z } from 'zod';
 import { recordCaptchaMetrics } from '~/utils/metrics';
 import { scopedLogger } from '~/utils/logger';
-import { ensureMetricsInitialized } from '~/plugins/metrics'; // reuse central initializer
+import { ensureMetricsInitialized } from '../../utils/metric-init';
 
 const log = scopedLogger('metrics-captcha');
 
-export default defineEventHandler(async (event) => {
+export default defineEventHandler(async event => {
   try {
-    // Initialize metrics safely on first request
     await ensureMetricsInitialized();
 
     const body = await readBody(event);
-    const validatedBody = z.object({
-      success: z.boolean(),
-    }).parse(body);
+    const validatedBody = z.object({ success: z.boolean() }).parse(body);
 
     recordCaptchaMetrics(validatedBody.success);
 
@@ -23,10 +20,8 @@ export default defineEventHandler(async (event) => {
       evt: 'metrics_error',
       error: error instanceof Error ? error.message : String(error),
     });
-
     throw createError({
-      statusCode:
-        error instanceof Error && error.message === 'metrics not initialized' ? 503 : 400,
+      statusCode: error instanceof Error && error.message === 'metrics not initialized' ? 503 : 400,
       message: error instanceof Error ? error.message : 'Failed to process metrics',
     });
   }

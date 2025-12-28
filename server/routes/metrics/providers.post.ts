@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { recordProviderMetrics } from '~/utils/metrics';
 import { scopedLogger } from '~/utils/logger';
-import { ensureMetricsInitialized } from '~/utils/metric-init';
+import { ensureMetricsInitialized } from '../../utils/metric-init';
 
 const log = scopedLogger('metrics-providers');
 
@@ -24,24 +24,18 @@ const metricsProviderInputSchema = z.object({
   batchId: z.string().optional(),
 });
 
-export default defineEventHandler(async (event) => {
-  // Handle both POST and PUT methods
+export default defineEventHandler(async event => {
   if (event.method !== 'POST' && event.method !== 'PUT') {
-    throw createError({
-      statusCode: 405,
-      message: 'Method not allowed',
-    });
+    throw createError({ statusCode: 405, message: 'Method not allowed' });
   }
 
   try {
-    // Initialize metrics inside the handler
     await ensureMetricsInitialized();
 
     const body = await readBody(event);
     const validatedBody = metricsProviderInputSchema.parse(body);
 
     const hostname = event.node.req.headers.origin?.slice(0, 255) ?? '<UNKNOWN>';
-
     recordProviderMetrics(validatedBody.items, hostname, validatedBody.tool);
 
     return true;
