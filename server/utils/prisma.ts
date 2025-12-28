@@ -4,17 +4,8 @@ let prismaInstance: PrismaClient | null = null;
 
 export function getPrisma(): PrismaClient {
   if (!prismaInstance) {
-    if (!process.env.DATABASE_URL) {
-      throw new Error('DATABASE_URL is not set');
-    }
-
-    prismaInstance = new PrismaClient({
-      datasources: {
-        db: {
-          url: process.env.DATABASE_URL,
-        },
-      },
-    });
+    // Just call the constructor with no options
+    prismaInstance = new PrismaClient(process.env.NODE_ENV === 'production' ? undefined : {} as any);
   }
   return prismaInstance;
 }

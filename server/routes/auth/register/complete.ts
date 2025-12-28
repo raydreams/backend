@@ -3,8 +3,6 @@ import { useChallenge } from '~/utils/challenge';
 import { useAuth } from '~/utils/auth';
 import { randomUUID } from 'crypto';
 import { generateRandomNickname } from '~/utils/nickname';
-import { ensureMetricsInitialized } from '~/utils/metric-init';
-import { prisma } from '~/utils/prisma'; // Make sure this is Workers-compatible
 
 const completeSchema = z.object({
   publicKey: z.string(),
@@ -21,9 +19,13 @@ const completeSchema = z.object({
   }),
 });
 
-export default defineEventHandler(async (event) => {
-  // Workers-safe metrics initialization
-  await ensureMetricsInitialized();
+export default defineEventHandler(async event => {
+  if (event.node.req.method !== 'POST') {
+    throw createError({
+      statusCode: 405,
+      message: 'HTTP method is not allowed. Use POST.',
+    });
+  }
 
   const body = await readBody(event);
 
@@ -73,7 +75,7 @@ export default defineEventHandler(async (event) => {
   });
 
   const auth = useAuth();
-  const userAgent = getRequestHeader(event, 'user-agent');
+  const userAgent = getRequestHeader(event, 'user-agent') || '';
   const session = await auth.makeSession(user.id, body.device, userAgent);
   const token = auth.makeSessionToken(session);
 

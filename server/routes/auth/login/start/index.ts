@@ -1,15 +1,17 @@
 import { z } from 'zod';
 import { useChallenge } from '~/utils/challenge';
-import { prisma } from '~/utils/prisma';
-import { ensureMetricsInitialized } from '~/utils/metric-init';
 
 const startSchema = z.object({
   publicKey: z.string(),
 });
 
-export default defineEventHandler(async (event) => {
-  // Workers-safe metrics initialization
-  await ensureMetricsInitialized();
+export default defineEventHandler(async event => {
+  if (event.node.req.method !== 'POST') {
+    throw createError({
+      statusCode: 405,
+      message: 'HTTP method is not allowed. Use POST.',
+    });
+  }
 
   const body = await readBody(event);
 

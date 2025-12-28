@@ -1,8 +1,6 @@
 import { z } from 'zod';
 import { useChallenge } from '~/utils/challenge';
 import { useAuth } from '~/utils/auth';
-import { prisma } from '~/utils/prisma';
-import { ensureMetricsInitialized } from '~/utils/metric-init';
 
 const completeSchema = z.object({
   publicKey: z.string(),
@@ -13,9 +11,13 @@ const completeSchema = z.object({
   device: z.string().max(500).min(1),
 });
 
-export default defineEventHandler(async (event) => {
-  // Workers-safe metrics initialization
-  await ensureMetricsInitialized();
+export default defineEventHandler(async event => {
+  if (event.node.req.method !== 'POST') {
+    throw createError({
+      statusCode: 405,
+      message: 'HTTP method is not allowed. Use POST.',
+    });
+  }
 
   const body = await readBody(event);
 
@@ -47,7 +49,6 @@ export default defineEventHandler(async (event) => {
     });
   }
 
-  // Update last login timestamp
   await prisma.users.update({
     where: { id: user.id },
     data: { last_logged_in: new Date() },
