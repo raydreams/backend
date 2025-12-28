@@ -33,4 +33,4 @@ export default defineEventHandler(async event => {
       message: error instanceof Error ? error.message : 'Failed to collect monthly metrics',
     });
   }
-}); 
+});

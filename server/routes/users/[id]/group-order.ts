@@ -51,4 +51,4 @@ export default defineEventHandler(async event => {
     statusCode: 405,
     message: 'Method not allowed',
   });
-}); 
+});
