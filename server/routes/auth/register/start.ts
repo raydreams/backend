@@ -6,9 +6,13 @@ const startSchema = z.object({
   captchaToken: z.string().optional(),
 });
 
+// Only allow your frontend
+const allowedOrigins = ['https://pstream.mov'];
+
 export default defineEventHandler(async (event: H3Event) => {
   const origin = event.req.headers.origin;
-  const allowedOrigins = ['https://pstream.mov'];
+
+  // === Always set CORS headers first ===
   if (origin && allowedOrigins.includes(origin)) {
     event.res.setHeader('Access-Control-Allow-Origin', origin);
   }
@@ -22,39 +26,74 @@ export default defineEventHandler(async (event: H3Event) => {
     'Content-Type, Authorization'
   );
 
+  // Handle preflight
   if (event.req.method === 'OPTIONS') {
     event.res.statusCode = 204;
     return '';
   }
 
-  if (event.req.method !== 'POST') {
-    throw createError({
-      statusCode: 405,
-      message: 'HTTP method not allowed. Use POST.',
-    });
-  }
-
-  // Read and validate body
-  const body = await readBody(event);
-  const result = startSchema.safeParse(body);
-  if (!result.success) {
-    throw createError({
-      statusCode: 400,
-      message: 'Invalid request body. Make sure to send JSON with { "captchaToken": "..." }',
-    });
-  }
-
   try {
-    console.log('Starting challenge creation...');
-    const challenge = useChallenge();
-    const challengeCode = await challenge.createChallengeCode('registration', 'mnemonic');
-    console.log('Challenge created:', challengeCode);
+    // Only POST allowed
+    if (event.req.method !== 'POST') {
+      throw createError({
+        statusCode: 405,
+        message: 'HTTP method not allowed. Use POST.',
+      });
+    }
 
+    // Read and validate body
+    const body = await readBody(event);
+    const result = startSchema.safeParse(body);
+    if (!result.success) {
+      throw createError({
+        statusCode: 400,
+        message:
+          'Invalid request body. Send JSON like { "captchaToken": "..." }',
+      });
+    }
+
+    // === Initialize challenge safely ===
+    console.log('Initializing challenge system...');
+    let challenge;
+    try {
+      challenge = useChallenge();
+      console.log('Challenge object:', challenge);
+    } catch (err) {
+      console.error('useChallenge() failed:', err);
+      throw createError({
+        statusCode: 500,
+        message: 'Failed to initialize challenge system',
+      });
+    }
+
+    // === Create challenge code safely ===
+    let challengeCode;
+    try {
+      challengeCode = await challenge.createChallengeCode(
+        'registration',
+        'mnemonic'
+      );
+      console.log('Challenge created:', challengeCode);
+    } catch (err) {
+      console.error('createChallengeCode() failed:', err);
+      throw createError({
+        statusCode: 500,
+        message: 'Challenge creation failed',
+      });
+    }
+
+    // Success response
     return { challenge: challengeCode.code };
   } catch (err) {
-    console.error('register/start error:', err);
+    // === Ensure CORS headers on error ===
+    if (origin && allowedOrigins.includes(origin)) {
+      event.res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    event.res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+    console.error('register/start error caught:', err);
     throw createError({
-      statusCode: 500,
+      statusCode: (err as any)?.statusCode || 500,
       message: (err as Error)?.message || 'Server error',
     });
   }
