@@ -1,28 +1,34 @@
-import { useAuth } from '#imports';
-import { prisma } from '#imports';
+import { query } from '../../../../utils/prisma';
+import { useAuth } from '../../../../utils/auth';
 
-export default defineEventHandler(async event => {
+export default defineEventHandler(async (event) => {
   const userId = event.context.params?.id;
   const listId = event.context.params?.listId;
-  const session = await useAuth().getCurrentSession();
 
+  if (!userId || !listId) {
+    throw createError({ statusCode: 400, message: 'Missing userId or listId' });
+  }
+
+  // Get current session
+  const session = await useAuth().getCurrentSession();
   if (session.user !== userId) {
     throw createError({
       statusCode: 403,
       message: 'Cannot delete lists for other users',
     });
   }
-  const list = await prisma.lists.findUnique({
-    where: { id: listId },
-  });
 
-  if (!list) {
-    throw createError({
-      statusCode: 404,
-      message: 'List not found',
-    });
+  // Fetch the list
+  const listResult = await query(
+    'SELECT * FROM lists WHERE id = $1',
+    [listId]
+  );
+
+  if (!listResult.rows.length) {
+    throw createError({ statusCode: 404, message: 'List not found' });
   }
 
+  const list = listResult.rows[0];
   if (list.user_id !== userId) {
     throw createError({
       statusCode: 403,
@@ -30,15 +36,10 @@ export default defineEventHandler(async event => {
     });
   }
 
-  await prisma.$transaction(async tx => {
-    await tx.list_items.deleteMany({
-      where: { list_id: listId },
-    });
-
-    await tx.lists.delete({
-      where: { id: listId },
-    });
-  });
+  // Delete list items
+  await query('DELETE FROM list_items WHERE list_id = $1', [listId]);
+  // Delete the list
+  await query('DELETE FROM lists WHERE id = $1', [listId]);
 
   return {
     id: listId,

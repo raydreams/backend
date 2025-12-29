@@ -1,6 +1,6 @@
-import { useAuth } from '#imports';
+import { useAuth } from '../../../../utils/auth';
+import { query } from '../../../../utils/prisma';
 import { z } from 'zod';
-import { prisma } from '#imports';
 
 const listItemSchema = z.object({
   tmdb_id: z.string(),
@@ -16,7 +16,7 @@ const updateListSchema = z.object({
   removeItems: z.array(listItemSchema).optional(),
 });
 
-export default defineEventHandler(async event => {
+export default defineEventHandler(async (event) => {
   const userId = event.context.params?.id;
   const session = await useAuth().getCurrentSession();
 
@@ -30,80 +30,72 @@ export default defineEventHandler(async event => {
   const body = await readBody(event);
   const validatedBody = updateListSchema.parse(body);
 
-  const list = await prisma.lists.findUnique({
-    where: { id: validatedBody.list_id },
-    include: { list_items: true },
-  });
+  // Fetch list and items
+  const listResult = await query(
+    `SELECT l.*, json_agg(li.*) FILTER (WHERE li.id IS NOT NULL) AS list_items
+     FROM lists l
+     LEFT JOIN list_items li ON li.list_id = l.id
+     WHERE l.id = $1 AND l.user_id = $2
+     GROUP BY l.id`,
+    [validatedBody.list_id, userId]
+  );
 
-  if (!list) {
-    throw createError({
-      statusCode: 404,
-      message: 'List not found',
-    });
+  if (!listResult.rows.length) {
+    throw createError({ statusCode: 404, message: 'List not found' });
   }
 
-  if (list.user_id !== userId) {
-    throw createError({
-      statusCode: 403,
-      message: "Cannot modify lists you don't own",
-    });
+  const list = listResult.rows[0];
+  const existingItems: { tmdb_id: string; type: string }[] = list.list_items ?? [];
+
+  // Update list metadata
+  if (validatedBody.name || validatedBody.description !== undefined || validatedBody.public !== undefined) {
+    await query(
+      `UPDATE lists
+       SET name = COALESCE($1, name),
+           description = COALESCE($2, description),
+           public = COALESCE($3, public)
+       WHERE id = $4`,
+      [validatedBody.name, validatedBody.description, validatedBody.public, list.id]
+    );
   }
 
-  const result = await prisma.$transaction(async tx => {
-    if (
-      validatedBody.name ||
-      validatedBody.description !== undefined ||
-      validatedBody.public !== undefined
-    ) {
-      await tx.lists.update({
-        where: { id: list.id },
-        data: {
-          name: validatedBody.name ?? list.name,
-          description:
-            validatedBody.description !== undefined ? validatedBody.description : list.description,
-          public: validatedBody.public ?? list.public,
-        },
-      });
-    }
+  // Add new items
+  if (validatedBody.addItems?.length) {
+    const itemsToAdd = validatedBody.addItems.filter(
+      item => !existingItems.some(e => e.tmdb_id === item.tmdb_id)
+    );
 
-    if (validatedBody.addItems && validatedBody.addItems.length > 0) {
-      const existingTmdbIds = list.list_items.map(item => item.tmdb_id);
-
-      const itemsToAdd = validatedBody.addItems.filter(
-        item => !existingTmdbIds.includes(item.tmdb_id)
+    for (const item of itemsToAdd) {
+      await query(
+        `INSERT INTO list_items (list_id, tmdb_id, type)
+         VALUES ($1, $2, $3)
+         ON CONFLICT DO NOTHING`,
+        [list.id, item.tmdb_id, item.type]
       );
-
-      if (itemsToAdd.length > 0) {
-        await tx.list_items.createMany({
-          data: itemsToAdd.map(item => ({
-            list_id: list.id,
-            tmdb_id: item.tmdb_id,
-            type: item.type,
-          })),
-          skipDuplicates: true,
-        });
-      }
     }
+  }
 
-    if (validatedBody.removeItems && validatedBody.removeItems.length > 0) {
-      const tmdbIdsToRemove = validatedBody.removeItems.map(item => item.tmdb_id);
+  // Remove items
+  if (validatedBody.removeItems?.length) {
+    const tmdbIdsToRemove = validatedBody.removeItems.map(item => item.tmdb_id);
+    await query(
+      `DELETE FROM list_items WHERE list_id = $1 AND tmdb_id = ANY($2::text[])`,
+      [list.id, tmdbIdsToRemove]
+    );
+  }
 
-      await tx.list_items.deleteMany({
-        where: {
-          list_id: list.id,
-          tmdb_id: { in: tmdbIdsToRemove },
-        },
-      });
-    }
-
-    return tx.lists.findUnique({
-      where: { id: list.id },
-      include: { list_items: true },
-    });
-  });
+  // Return updated list
+  const updatedListResult = await query(
+    `SELECT l.*, json_agg(li.*) FILTER (WHERE li.id IS NOT NULL) AS list_items
+     FROM lists l
+     LEFT JOIN list_items li ON li.list_id = l.id
+     WHERE l.id = $1
+     GROUP BY l.id`,
+    [list.id]
+  );
 
   return {
-    list: result,
+    list: updatedListResult.rows[0],
     message: 'List updated successfully',
   };
 });
