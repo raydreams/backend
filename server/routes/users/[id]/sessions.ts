@@ -1,4 +1,5 @@
 import { useAuth } from '~/utils/auth';
+import { query } from '~/utils/prisma';
 
 export default defineEventHandler(async event => {
   const userId = getRouterParam(event, 'id');
@@ -12,11 +13,18 @@ export default defineEventHandler(async event => {
     });
   }
 
-  const sessions = await prisma.sessions.findMany({
-    where: { user: userId },
-  });
+  const result = await query(
+    `
+    SELECT *
+    FROM sessions
+    WHERE "user" = $1
+    ORDER BY created_at DESC
+    `,
+    [userId]
+  );
 
-  return sessions.map(s => ({
+  // Use result.rows instead of Prisma's array
+  return result.rows.map(s => ({
     id: s.id,
     userId: s.user,
     createdAt: s.created_at.toISOString(),

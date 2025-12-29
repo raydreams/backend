@@ -1,11 +1,33 @@
 import { useAuth } from '~/utils/auth';
+import { query } from '~/utils/prisma';
 
 export default defineEventHandler(async event => {
   const session = await useAuth().getCurrentSession();
 
-  const user = await prisma.users.findUnique({
-    where: { id: session.user },
-  });
+  if (!session) {
+    throw createError({
+      statusCode: 401,
+      message: 'Session not found or expired',
+    });
+  }
+
+  const users = await query(
+    `
+      SELECT
+        id,
+        public_key,
+        namespace,
+        nickname,
+        profile,
+        permissions
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [session.user]
+  );
+
+  const user = users[0];
 
   if (!user) {
     throw createError({

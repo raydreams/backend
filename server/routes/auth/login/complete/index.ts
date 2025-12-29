@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { useChallenge } from '~/utils/challenge';
 import { useAuth } from '~/utils/auth';
+import { query } from '~/utils/prisma';
 
 const completeSchema = z.object({
   publicKey: z.string(),
@@ -20,8 +21,8 @@ export default defineEventHandler(async event => {
   }
 
   const body = await readBody(event);
-
   const result = completeSchema.safeParse(body);
+
   if (!result.success) {
     throw createError({
       statusCode: 400,
@@ -29,6 +30,9 @@ export default defineEventHandler(async event => {
     });
   }
 
+  /** ─────────────────────────────
+   *  Verify challenge
+   *  ───────────────────────────── */
   const challenge = useChallenge();
   await challenge.verifyChallengeCode(
     body.challenge.code,
@@ -38,22 +42,44 @@ export default defineEventHandler(async event => {
     'mnemonic'
   );
 
-  const user = await prisma.users.findUnique({
-    where: { public_key: body.publicKey },
-  });
+  /** ─────────────────────────────
+   *  Fetch user by public key
+   *  ───────────────────────────── */
+  const userRes = await query(
+    `
+    SELECT
+      id,
+      public_key,
+      namespace,
+      profile,
+      permissions
+    FROM users
+    WHERE public_key = $1
+    LIMIT 1
+    `,
+    [body.publicKey]
+  );
 
-  if (!user) {
+  if (userRes.rows.length === 0) {
     throw createError({
       statusCode: 401,
       message: 'User cannot be found',
     });
   }
 
-  await prisma.users.update({
-    where: { id: user.id },
-    data: { last_logged_in: new Date() },
-  });
+  const user = userRes.rows[0];
 
+  /** ─────────────────────────────
+   *  Update last login timestamp
+   *  ───────────────────────────── */
+  await query(
+    `UPDATE users SET last_logged_in = NOW() WHERE id = $1`,
+    [user.id]
+  );
+
+  /** ─────────────────────────────
+   *  Create session
+   *  ───────────────────────────── */
   const auth = useAuth();
   const userAgent = getRequestHeader(event, 'user-agent') || '';
   const session = await auth.makeSession(user.id, body.device, userAgent);

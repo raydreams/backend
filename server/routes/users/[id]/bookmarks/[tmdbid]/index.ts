@@ -1,6 +1,7 @@
 import { useAuth } from '~/utils/auth';
 import { z } from 'zod';
 import { scopedLogger } from '~/utils/logger';
+import { query } from '~/utils/prisma';
 
 const log = scopedLogger('user-bookmarks');
 
@@ -28,43 +29,75 @@ export default defineEventHandler(async event => {
   }
 
   if (event.method === 'POST') {
+    const body = await readBody(event);
+    log.info('Creating bookmark', { userId, tmdbId, body });
+
+    const validated = bookmarkRequestSchema.parse(body);
+    const meta = bookmarkMetaSchema.parse(validated.meta || body);
+    const group = validated.group ? (Array.isArray(validated.group) ? validated.group : [validated.group]) : [];
+    const favoriteEpisodes = validated.favoriteEpisodes || [];
+
     try {
-      const body = await readBody(event);
-      log.info('Creating bookmark', { userId, tmdbId, body });
+      // Try to find existing bookmark
+      const existingRes = await query(
+        `SELECT * FROM bookmarks WHERE tmdb_id=$1 AND user_id=$2`,
+        [tmdbId, session.user]
+      );
 
-      const validated = bookmarkRequestSchema.parse(body);
-      const meta = bookmarkMetaSchema.parse(validated.meta || body);
-      const group = validated.group ? (Array.isArray(validated.group) ? validated.group : [validated.group]) : [];
-      const favoriteEpisodes = validated.favoriteEpisodes || [];
-
-      const bookmark = await prisma.bookmarks.upsert({
-        where: { tmdb_id_user_id: { tmdb_id: tmdbId, user_id: session.user } },
-        update: { meta, group, favorite_episodes: favoriteEpisodes, updated_at: new Date() },
-        create: { user_id: session.user, tmdb_id: tmdbId, meta, group, favorite_episodes: favoriteEpisodes, updated_at: new Date() },
-      });
-
-      log.info('Bookmark created successfully', { userId, tmdbId });
-      return {
-        tmdbId: bookmark.tmdb_id,
-        meta: bookmark.meta,
-        group: bookmark.group,
-        favoriteEpisodes: bookmark.favorite_episodes,
-        updatedAt: bookmark.updated_at,
-      };
+      if (existingRes.rowCount > 0) {
+        // Update existing
+        const updatedRes = await query(
+          `UPDATE bookmarks 
+           SET meta=$1::jsonb, group=$2::text[], favorite_episodes=$3::text[], updated_at=NOW() 
+           WHERE tmdb_id=$4 AND user_id=$5 RETURNING *`,
+          [JSON.stringify(meta), group, favoriteEpisodes, tmdbId, session.user]
+        );
+        const bookmark = updatedRes.rows[0];
+        log.info('Bookmark updated successfully', { userId, tmdbId });
+        return {
+          tmdbId: bookmark.tmdb_id,
+          meta: bookmark.meta,
+          group: bookmark.group,
+          favoriteEpisodes: bookmark.favorite_episodes,
+          updatedAt: bookmark.updated_at,
+        };
+      } else {
+        // Create new
+        const createdRes = await query(
+          `INSERT INTO bookmarks (id, user_id, tmdb_id, meta, group, favorite_episodes, updated_at)
+           VALUES (gen_random_uuid(), $1, $2, $3::jsonb, $4::text[], $5::text[], NOW()) RETURNING *`,
+          [session.user, tmdbId, JSON.stringify(meta), group, favoriteEpisodes]
+        );
+        const bookmark = createdRes.rows[0];
+        log.info('Bookmark created successfully', { userId, tmdbId });
+        return {
+          tmdbId: bookmark.tmdb_id,
+          meta: bookmark.meta,
+          group: bookmark.group,
+          favoriteEpisodes: bookmark.favorite_episodes,
+          updatedAt: bookmark.updated_at,
+        };
+      }
     } catch (error) {
-      log.error('Failed to create bookmark', { userId, tmdbId, error: error instanceof Error ? error.message : String(error) });
+      log.error('Failed to upsert bookmark', { userId, tmdbId, error: error instanceof Error ? error.message : String(error) });
       if (error instanceof z.ZodError) throw createError({ statusCode: 400, message: JSON.stringify(error.errors, null, 2) });
-      throw error;
+      throw createError({ statusCode: 500, message: 'Failed to upsert bookmark', cause: error instanceof Error ? error.message : String(error) });
     }
-  } else if (event.method === 'DELETE') {
+  }
+
+  if (event.method === 'DELETE') {
     log.info('Deleting bookmark', { userId, tmdbId });
     try {
-      await prisma.bookmarks.delete({ where: { tmdb_id_user_id: { tmdb_id: tmdbId, user_id: session.user } } });
+      await query(
+        `DELETE FROM bookmarks WHERE tmdb_id=$1 AND user_id=$2`,
+        [tmdbId, session.user]
+      );
       log.info('Bookmark deleted successfully', { userId, tmdbId });
+      return { success: true, tmdbId };
     } catch (error) {
       log.error('Failed to delete bookmark', { userId, tmdbId, error: error instanceof Error ? error.message : String(error) });
+      throw createError({ statusCode: 500, message: 'Failed to delete bookmark', cause: error instanceof Error ? error.message : String(error) });
     }
-    return { success: true, tmdbId };
   }
 
   throw createError({ statusCode: 405, message: 'Method not allowed' });

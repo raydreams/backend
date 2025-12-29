@@ -1,15 +1,18 @@
 import { useAuth } from '~/utils/auth';
 import { z } from 'zod';
 import { scopedLogger } from '~/utils/logger';
+import { query } from '~/utils/prisma';
 
 const log = scopedLogger('user-profile');
 
 const userProfileSchema = z.object({
-  profile: z.object({
-    icon: z.string(),
-    colorA: z.string(),
-    colorB: z.string(),
-  }).optional(),
+  profile: z
+    .object({
+      icon: z.string(),
+      colorA: z.string(),
+      colorB: z.string(),
+    })
+    .optional(),
   nickname: z.string().min(1).max(255).optional(),
 });
 
@@ -17,7 +20,6 @@ export default defineEventHandler(async event => {
   const userId = event.context.params?.id;
 
   const session = await useAuth().getCurrentSession();
-
   if (session.user !== userId) {
     throw createError({
       statusCode: 403,
@@ -32,31 +34,38 @@ export default defineEventHandler(async event => {
 
       const validatedBody = userProfileSchema.parse(body);
 
-      const updateData: any = {};
+      const updates: string[] = [];
+      const values: any[] = [];
+      let idx = 1;
+
       if (validatedBody.profile) {
-        updateData.profile = validatedBody.profile;
+        updates.push(`profile = $${idx++}`);
+        values.push(validatedBody.profile);
       }
       if (validatedBody.nickname !== undefined) {
-        updateData.nickname = validatedBody.nickname;
+        updates.push(`nickname = $${idx++}`);
+        values.push(validatedBody.nickname);
       }
 
-      const user = await prisma.users.update({
-        where: { id: userId },
-        data: updateData,
-      });
+      if (updates.length === 0) {
+        return { message: 'Nothing to update' };
+      }
+
+      values.push(userId);
+
+      const updatedUser = await query(
+        `
+        UPDATE users
+        SET ${updates.join(', ')}
+        WHERE id = $${idx}
+        RETURNING id, public_key, namespace, nickname, profile, permissions, created_at, last_logged_in
+        `,
+        values
+      );
 
       log.info('User profile updated successfully', { userId });
 
-      return {
-        id: user.id,
-        publicKey: user.public_key,
-        namespace: user.namespace,
-        nickname: (user as any).nickname,
-        profile: user.profile,
-        permissions: user.permissions,
-        createdAt: user.created_at,
-        lastLoggedIn: user.last_logged_in,
-      };
+      return updatedUser.rows[0];
     } catch (error) {
       log.error('Failed to update user profile', {
         userId,
@@ -83,31 +92,12 @@ export default defineEventHandler(async event => {
     try {
       log.info('Deleting user account', { userId });
 
-      // Delete related records first
-      await prisma.$transaction(async tx => {
-        // Delete user bookmarks
-        await tx.bookmarks.deleteMany({
-          where: { user_id: userId },
-        });
-
-        await tx.progress_items.deleteMany({
-          where: { user_id: userId },
-        });
-
-        await tx.user_settings
-          .delete({
-            where: { id: userId },
-          })
-          .catch(() => {});
-
-        await tx.sessions.deleteMany({
-          where: { user: userId },
-        });
-
-        await tx.users.delete({
-          where: { id: userId },
-        });
-      });
+      // Delete related records in order
+      await query(`DELETE FROM bookmarks WHERE user_id = $1`, [userId]);
+      await query(`DELETE FROM progress_items WHERE user_id = $1`, [userId]);
+      await query(`DELETE FROM user_settings WHERE id = $1`, [userId]).catch(() => {});
+      await query(`DELETE FROM sessions WHERE user = $1`, [userId]);
+      await query(`DELETE FROM users WHERE id = $1`, [userId]);
 
       log.info('User account deleted successfully', { userId });
 

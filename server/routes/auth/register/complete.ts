@@ -3,6 +3,7 @@ import { useChallenge } from '~/utils/challenge';
 import { useAuth } from '~/utils/auth';
 import { randomUUID } from 'crypto';
 import { generateRandomNickname } from '~/utils/nickname';
+import { query } from '~/utils/prisma';
 
 const completeSchema = z.object({
   publicKey: z.string(),
@@ -28,9 +29,9 @@ export default defineEventHandler(async event => {
   }
 
   const body = await readBody(event);
+  const parsed = completeSchema.safeParse(body);
 
-  const result = completeSchema.safeParse(body);
-  if (!result.success) {
+  if (!parsed.success) {
     throw createError({
       statusCode: 400,
       message: 'Invalid request body',
@@ -46,34 +47,60 @@ export default defineEventHandler(async event => {
     'mnemonic'
   );
 
-  const existingUser = await prisma.users.findUnique({
-    where: { public_key: body.publicKey },
-  });
+  /** ─────────────────────────────
+   *  Check for existing user
+   *  ───────────────────────────── */
+  const existing = await query(
+    `SELECT id FROM users WHERE public_key = $1 LIMIT 1`,
+    [body.publicKey]
+  );
 
-  if (existingUser) {
+  if (existing.rows.length > 0) {
     throw createError({
       statusCode: 409,
       message: 'A user with this public key already exists',
     });
   }
 
+  /** ─────────────────────────────
+   *  Create user
+   *  ───────────────────────────── */
   const userId = randomUUID();
   const now = new Date();
   const nickname = generateRandomNickname();
 
-  const user = await prisma.users.create({
-    data: {
-      id: userId,
-      namespace: body.namespace,
-      public_key: body.publicKey,
+  const insert = await query(
+    `
+    INSERT INTO users (
+      id,
+      namespace,
+      public_key,
       nickname,
-      created_at: now,
-      last_logged_in: now,
-      permissions: [],
-      profile: body.profile,
-    } as any,
-  });
+      created_at,
+      last_logged_in,
+      permissions,
+      profile
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    RETURNING *
+    `,
+    [
+      userId,
+      body.namespace,
+      body.publicKey,
+      nickname,
+      now,
+      now,
+      JSON.stringify([]),
+      JSON.stringify(body.profile),
+    ]
+  );
 
+  const user = insert.rows[0];
+
+  /** ─────────────────────────────
+   *  Create session
+   *  ───────────────────────────── */
   const auth = useAuth();
   const userAgent = getRequestHeader(event, 'user-agent') || '';
   const session = await auth.makeSession(user.id, body.device, userAgent);

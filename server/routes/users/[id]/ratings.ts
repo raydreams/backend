@@ -1,5 +1,6 @@
 import { useAuth } from '~/utils/auth';
 import { z } from 'zod';
+import { query } from '~/utils/prisma';
 
 const userRatingsSchema = z.object({
   tmdb_id: z.number(),
@@ -20,67 +21,63 @@ export default defineEventHandler(async event => {
   }
 
   if (event.method === 'GET') {
-    const ratings = await prisma.users.findMany({
-      select: {
-        ratings: true,
-      },
-      where: {
-        id: userId,
-      },
-    });
+    const result = await query(
+      `
+      SELECT ratings
+      FROM users
+      WHERE id = $1
+      `,
+      [userId]
+    );
+
+    const ratings = result.rows[0]?.ratings || [];
 
     return {
       userId,
-      ratings: ratings[0].ratings,
+      ratings,
     };
   } else if (event.method === 'POST') {
     const body = await readBody(event);
     const validatedBody = userRatingsSchema.parse(body);
 
-    const user = await prisma.users.findUnique({
-      where: {
-        id: userId,
-      },
-      select: {
-        ratings: true,
-      },
-    });
+    // Fetch current ratings
+    const fetchResult = await query(
+      `
+      SELECT ratings
+      FROM users
+      WHERE id = $1
+      `,
+      [userId]
+    );
 
-    const userRatings = user?.ratings || [];
-    const currentRatings = Array.isArray(userRatings) ? userRatings : [];
-
-    const existingRatingIndex = currentRatings.findIndex(
+    const currentRatings = fetchResult.rows[0]?.ratings || [];
+    const updatedRatings = [...currentRatings];
+    const existingIndex = updatedRatings.findIndex(
       (r: any) => r.tmdb_id === validatedBody.tmdb_id && r.type === validatedBody.type
     );
 
-    let updatedRatings;
-    if (existingRatingIndex >= 0) {
-      updatedRatings = [...currentRatings];
-      updatedRatings[existingRatingIndex] = validatedBody;
+    if (existingIndex >= 0) {
+      updatedRatings[existingIndex] = validatedBody;
     } else {
-      updatedRatings = [...currentRatings, validatedBody];
+      updatedRatings.push(validatedBody);
     }
 
-    await prisma.users.update({
-      where: {
-        id: userId,
-      },
-      data: {
-        ratings: updatedRatings,
-      },
-    });
+    // Update the user ratings
+    await query(
+      `
+      UPDATE users
+      SET ratings = $1
+      WHERE id = $2
+      `,
+      [updatedRatings, userId]
+    );
 
     return {
       userId,
-      rating: {
-        tmdb_id: validatedBody.tmdb_id,
-        type: validatedBody.type,
-        rating: validatedBody.rating,
-      },
+      rating: validatedBody,
     };
   }
 
-  // This should only execute if the method is neither GET nor POST
   throw createError({
     statusCode: 405,
     message: 'Method not allowed',

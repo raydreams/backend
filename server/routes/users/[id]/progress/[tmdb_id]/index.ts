@@ -1,6 +1,7 @@
 import { useAuth } from '~/utils/auth';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
+import { query } from '~/utils/prisma';
 
 const progressMetaSchema = z.object({
   title: z.string(),
@@ -21,7 +22,6 @@ const progressItemSchema = z.object({
   updatedAt: z.string().datetime({ offset: true }).optional(),
 });
 
-// 13th July 2021 - movie-web epoch
 const minEpoch = 1626134400000;
 
 const coerceDateTime = (dateTime?: string) => {
@@ -34,86 +34,90 @@ const normalizeIds = (metaType: string, seasonId?: string, episodeId?: string) =
   episodeId: metaType === 'movie' ? '\n' : episodeId || null,
 });
 
-const formatProgressItem = (item: any) => ({
-  id: item.id,
-  tmdbId: item.tmdb_id,
-  userId: item.user_id,
-  seasonId: item.season_id === '\n' ? null : item.season_id,
-  episodeId: item.episode_id === '\n' ? null : item.episode_id,
-  seasonNumber: item.season_number,
-  episodeNumber: item.episode_number,
-  meta: item.meta,
-  duration: Number(item.duration),
-  watched: Number(item.watched),
-  updatedAt: item.updated_at,
-});
-
 export default defineEventHandler(async (event) => {
   const { id: userId, tmdb_id: tmdbId } = event.context.params!;
   const method = event.method;
 
   const session = await useAuth().getCurrentSession();
-  if (session.user !== userId) {
-    throw createError({ statusCode: 403, message: 'Unauthorized' });
-  }
+  if (session.user !== userId) throw createError({ statusCode: 403, message: 'Unauthorized' });
 
   if (method === 'PUT') {
     const body = await readBody(event);
-    let parsedBody;
-    try {
-      parsedBody = progressItemSchema.parse(body);
-    } catch (error) {
-      throw createError({ statusCode: 400, message: error.message });
-    }
-    const { meta, tmdbId, duration, watched, seasonId, episodeId, seasonNumber, episodeNumber, updatedAt } = parsedBody;
+    const parsedBody = progressItemSchema.parse(body);
+    const { meta, duration, watched, seasonId, episodeId, seasonNumber, episodeNumber, updatedAt } = parsedBody;
 
     const now = coerceDateTime(updatedAt);
     const { seasonId: normSeasonId, episodeId: normEpisodeId } = normalizeIds(meta.type, seasonId, episodeId);
 
-    const existing = await prisma.progress_items.findUnique({
-      where: { tmdb_id_user_id_season_id_episode_id: { tmdb_id: tmdbId, user_id: userId, season_id: normSeasonId, episode_id: normEpisodeId } },
-    });
+    const existingRes = await query(
+      `SELECT * FROM progress_items WHERE tmdb_id=$1 AND user_id=$2 AND COALESCE(season_id,'')=$3 AND COALESCE(episode_id,'')=$4`,
+      [tmdbId, userId, normSeasonId || '', normEpisodeId || '']
+    );
+    const existing = existingRes.rows[0];
 
     const data = {
-      duration: BigInt(duration),
-      watched: BigInt(watched),
-      meta,
-      updated_at: now,
+      duration,
+      watched,
+      meta: JSON.stringify(meta),
+      updated_at: now.toISOString(),
     };
 
-    const progressItem = existing
-      ? await prisma.progress_items.update({ where: { id: existing.id }, data })
-      : await prisma.progress_items.create({
-          data: {
-            id: randomUUID(),
-            tmdb_id: tmdbId,
-            user_id: userId,
-            season_id: normSeasonId,
-            episode_id: normEpisodeId,
-            season_number: seasonNumber || null,
-            episode_number: episodeNumber || null,
-            ...data,
-          },
-        });
+    let row;
+    if (existing) {
+      const updateRes = await query(
+        `UPDATE progress_items SET duration=$1, watched=$2, meta=$3::jsonb, updated_at=$4 WHERE id=$5 RETURNING *`,
+        [BigInt(duration), BigInt(watched), JSON.stringify(meta), now.toISOString(), existing.id]
+      );
+      row = updateRes.rows[0];
+    } else {
+      const id = randomUUID();
+      const insertRes = await query(
+        `INSERT INTO progress_items
+         (id, tmdb_id, user_id, season_id, episode_id, season_number, episode_number, duration, watched, meta, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11) RETURNING *`,
+        [id, tmdbId, userId, normSeasonId, normEpisodeId, seasonNumber || null, episodeNumber || null, BigInt(duration), BigInt(watched), JSON.stringify(meta), now.toISOString()]
+      );
+      row = insertRes.rows[0];
+    }
 
-    return formatProgressItem(progressItem);
+    return {
+      id: row.id,
+      tmdbId: row.tmdb_id,
+      userId: row.user_id,
+      seasonId: row.season_id === '\n' ? null : row.season_id,
+      episodeId: row.episode_id === '\n' ? null : row.episode_id,
+      seasonNumber: row.season_number,
+      episodeNumber: row.episode_number,
+      meta: row.meta,
+      duration: Number(row.duration),
+      watched: Number(row.watched),
+      updatedAt: new Date(row.updated_at).toISOString(),
+    };
   }
 
   if (method === 'DELETE') {
     const body = await readBody(event).catch(() => ({}));
-    const where: any = { user_id: userId, tmdb_id: tmdbId };
+    let seasonIdVal = body.seasonId;
+    let episodeIdVal = body.episodeId;
 
-    if (body.seasonId) where.season_id = body.seasonId;
-    else if (body.meta?.type === 'movie') where.season_id = '\n';
+    if (body.meta?.type === 'movie') {
+      seasonIdVal = '\n';
+      episodeIdVal = '\n';
+    }
 
-    if (body.episodeId) where.episode_id = body.episodeId;
-    else if (body.meta?.type === 'movie') where.episode_id = '\n';
+    const itemsRes = await query(
+      `SELECT * FROM progress_items WHERE user_id=$1 AND tmdb_id=$2 AND ($3 IS NULL OR season_id=$3) AND ($4 IS NULL OR episode_id=$4)`,
+      [userId, tmdbId, seasonIdVal, episodeIdVal]
+    );
 
-    const items = await prisma.progress_items.findMany({ where });
-    if (items.length === 0) return { count: 0, tmdbId, episodeId: body.episodeId, seasonId: body.seasonId };
+    if (itemsRes.rowCount === 0) return { count: 0, tmdbId, episodeId: episodeIdVal, seasonId: seasonIdVal };
 
-    await prisma.progress_items.deleteMany({ where });
-    return { count: items.length, tmdbId, episodeId: body.episodeId, seasonId: body.seasonId };
+    await query(
+      `DELETE FROM progress_items WHERE user_id=$1 AND tmdb_id=$2 AND ($3 IS NULL OR season_id=$3) AND ($4 IS NULL OR episode_id=$4)`,
+      [userId, tmdbId, seasonIdVal, episodeIdVal]
+    );
+
+    return { count: itemsRes.rowCount, tmdbId, episodeId: episodeIdVal, seasonId: seasonIdVal };
   }
 
   throw createError({ statusCode: 405, message: 'Method not allowed' });

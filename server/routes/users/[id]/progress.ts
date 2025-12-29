@@ -1,63 +1,47 @@
 import { useAuth } from '~/utils/auth';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
+import { query } from '~/utils/prisma';
 
 function progressIsNotStarted(duration: number, watched: number): boolean {
-  // too short watch time
-  if (watched < 20) return true;
-  return false;
+  return watched < 20;
 }
 
 function progressIsCompleted(duration: number, watched: number): boolean {
-  const timeFromEnd = duration - watched;
-  // too close to the end, is completed
-  if (timeFromEnd < 60 * 2) return true;
-  return false;
+  return duration - watched < 120; // 2 minutes
 }
 
 async function shouldSaveProgress(
   userId: string,
   tmdbId: string,
-  validatedBody: any,
-  prisma: any
+  validatedBody: any
 ): Promise<boolean> {
   const duration = parseInt(validatedBody.duration);
   const watched = parseInt(validatedBody.watched);
 
-  // Check if progress is acceptable
   const isNotStarted = progressIsNotStarted(duration, watched);
   const isCompleted = progressIsCompleted(duration, watched);
   const isAcceptable = !isNotStarted && !isCompleted;
 
-  // For movies, only save if acceptable
-  if (validatedBody.meta.type === 'movie') {
-    return isAcceptable;
-  }
-
-  // For shows, save if acceptable OR if season has other watched episodes
+  if (validatedBody.meta.type === 'movie') return isAcceptable;
   if (isAcceptable) return true;
 
-  // Check if this season has other episodes with progress
   if (!validatedBody.seasonId) return false;
 
-  const seasonEpisodes = await prisma.progress_items.findMany({
-    where: {
-      user_id: userId,
-      tmdb_id: tmdbId,
-      season_id: validatedBody.seasonId,
-      episode_id: {
-        not: validatedBody.episodeId || null
-      }
-    }
-  });
+  const seasonEpisodes = await query(
+    `
+    SELECT duration, watched
+    FROM progress_items
+    WHERE user_id = $1 AND tmdb_id = $2 AND season_id = $3 AND episode_id IS DISTINCT FROM $4
+    `,
+    [userId, tmdbId, validatedBody.seasonId, validatedBody.episodeId || null]
+  );
 
-  // Check if any other episode in this season has acceptable progress
-  return seasonEpisodes.some((episode: any) => {
-    const epDuration = Number(episode.duration);
-    const epWatched = Number(episode.watched);
-    return !progressIsNotStarted(epDuration, epWatched) &&
-           !progressIsCompleted(epDuration, epWatched);
-  });
+  return seasonEpisodes.rows.some(
+    (episode: any) =>
+      !progressIsNotStarted(Number(episode.duration), Number(episode.watched)) &&
+      !progressIsCompleted(Number(episode.duration), Number(episode.watched))
+  );
 }
 
 const progressMetaSchema = z.object({
@@ -79,9 +63,7 @@ const progressItemSchema = z.object({
   updatedAt: z.string().datetime({ offset: true }).optional(),
 });
 
-// 13th July 2021 - movie-web epoch
 const minEpoch = 1626134400000;
-
 function defaultAndCoerceDateTime(dateTime: string | undefined) {
   const epoch = dateTime ? new Date(dateTime).getTime() : Date.now();
   const clampedEpoch = Math.max(minEpoch, Math.min(epoch, Date.now()));
@@ -93,57 +75,44 @@ export default defineEventHandler(async event => {
   const method = event.method;
 
   const session = await useAuth().getCurrentSession();
-  if (!session) {
-    throw createError({
-      statusCode: 401,
-      message: 'Session not found or expired',
-    });
-  }
+  if (!session) throw createError({ statusCode: 401, message: 'Session not found' });
+  if (session.user !== userId)
+    throw createError({ statusCode: 403, message: 'Cannot access other user info' });
 
-  if (session.user !== userId) {
-    throw createError({
-      statusCode: 403,
-      message: 'Cannot access other user information',
-    });
-  }
-
+  // GET all progress items
   if (method === 'GET') {
-    const items = await prisma.progress_items.findMany({
-      where: { user_id: userId },
-    });
+    const items = await query(
+      `
+      SELECT *
+      FROM progress_items
+      WHERE user_id = $1
+      ORDER BY updated_at DESC
+      `,
+      [userId]
+    );
 
-    return items.map(item => ({
+    return items.rows.map((item: any) => ({
       id: item.id,
       tmdbId: item.tmdb_id,
-      episode: {
-        id: item.episode_id || null,
-        number: item.episode_number || null,
-      },
-      season: {
-        id: item.season_id || null,
-        number: item.season_number || null,
-      },
+      episode: { id: item.episode_id || null, number: item.episode_number || null },
+      season: { id: item.season_id || null, number: item.season_number || null },
       meta: item.meta,
-      duration: item.duration.toString(),
-      watched: item.watched.toString(),
-      updatedAt: item.updated_at.toISOString(),
+      duration: Number(item.duration),
+      watched: Number(item.watched),
+      updatedAt: item.updated_at,
     }));
   }
 
+  // DELETE cleanup
   if (method === 'DELETE' && event.path.endsWith('/progress/cleanup')) {
-    // Clean up unwanted progress items (unwatched or finished)
-    const allItems = await prisma.progress_items.findMany({
-      where: { user_id: userId },
-    });
+    const allItems = await query(`SELECT * FROM progress_items WHERE user_id = $1`, [userId]);
 
     const itemsToDelete: string[] = [];
 
-    // Group items by tmdbId for show processing
+    // group by tmdb_id
     const itemsByTmdbId: Record<string, any[]> = {};
-    for (const item of allItems) {
-      if (!itemsByTmdbId[item.tmdb_id]) {
-        itemsByTmdbId[item.tmdb_id] = [];
-      }
+    for (const item of allItems.rows) {
+      if (!itemsByTmdbId[item.tmdb_id]) itemsByTmdbId[item.tmdb_id] = [];
       itemsByTmdbId[item.tmdb_id].push(item);
     }
 
@@ -151,71 +120,58 @@ export default defineEventHandler(async event => {
       const movieItems = items.filter(item => !item.episode_id);
       const episodeItems = items.filter(item => item.episode_id);
 
-      // Process movies
+      // movies
       for (const item of movieItems) {
         const duration = Number(item.duration);
         const watched = Number(item.watched);
-        const isNotStarted = progressIsNotStarted(duration, watched);
-        const isCompleted = progressIsCompleted(duration, watched);
-
-        if (isNotStarted || isCompleted) {
+        if (progressIsNotStarted(duration, watched) || progressIsCompleted(duration, watched)) {
           itemsToDelete.push(item.id);
         }
       }
 
-      // Process episodes - group by season
+      // episodes grouped by season
       const episodesBySeason: Record<string, any[]> = {};
       for (const item of episodeItems) {
-        const seasonKey = `${item.season_id}`;
-        if (!episodesBySeason[seasonKey]) {
-          episodesBySeason[seasonKey] = [];
-        }
-        episodesBySeason[seasonKey].push(item);
+        const key = `${item.season_id}`;
+        if (!episodesBySeason[key]) episodesBySeason[key] = [];
+        episodesBySeason[key].push(item);
       }
 
       for (const seasonItems of Object.values(episodesBySeason)) {
-        // Check if season has any acceptable episodes
-        const hasAcceptableEpisodes = seasonItems.some((item: any) => {
-          const duration = Number(item.duration);
-          const watched = Number(item.watched);
-          return !progressIsNotStarted(duration, watched) &&
-                 !progressIsCompleted(duration, watched);
-        });
+        const hasAcceptable = seasonItems.some(
+          (item: any) =>
+            !progressIsNotStarted(Number(item.duration), Number(item.watched)) &&
+            !progressIsCompleted(Number(item.duration), Number(item.watched))
+        );
 
-        if (hasAcceptableEpisodes) {
-          // If season has acceptable episodes, only delete unacceptable ones
+        if (hasAcceptable) {
           for (const item of seasonItems) {
             const duration = Number(item.duration);
             const watched = Number(item.watched);
-            const isNotStarted = progressIsNotStarted(duration, watched);
-            const isCompleted = progressIsCompleted(duration, watched);
-
-            if (isNotStarted || isCompleted) {
+            if (progressIsNotStarted(duration, watched) || progressIsCompleted(duration, watched)) {
               itemsToDelete.push(item.id);
             }
           }
         } else {
-          // If no acceptable episodes in season, delete all
-          itemsToDelete.push(...seasonItems.map((item: any) => item.id));
+          itemsToDelete.push(...seasonItems.map(item => item.id));
         }
       }
     }
 
-    if (itemsToDelete.length > 0) {
-      await prisma.progress_items.deleteMany({
-        where: {
-          id: { in: itemsToDelete },
-          user_id: userId,
-        },
-      });
+    if (itemsToDelete.length) {
+      await query(
+        `
+        DELETE FROM progress_items
+        WHERE user_id = $1 AND id = ANY($2)
+        `,
+        [userId, itemsToDelete]
+      );
     }
 
-    return {
-      deletedCount: itemsToDelete.length,
-      message: `Cleaned up ${itemsToDelete.length} unwanted progress items`,
-    };
+    return { deletedCount: itemsToDelete.length, message: `Cleaned up ${itemsToDelete.length} items` };
   }
 
+  // PUT or DELETE for a single progress item
   if (event.path.includes('/progress/') && !event.path.endsWith('/import') && !event.path.endsWith('/cleanup')) {
     const segments = event.path.split('/');
     const tmdbId = segments[segments.length - 1];
@@ -224,10 +180,10 @@ export default defineEventHandler(async event => {
       const body = await readBody(event);
       const validatedBody = progressItemSchema.parse(body);
 
-      // Check if this progress should be saved
-      const shouldSave = await shouldSaveProgress(userId, tmdbId, validatedBody, prisma);
+      const shouldSave = await shouldSaveProgress(userId, tmdbId, validatedBody);
+      const now = defaultAndCoerceDateTime(validatedBody.updatedAt);
+
       if (!shouldSave) {
-        // Return early without saving
         return {
           id: '',
           tmdbId,
@@ -239,100 +195,101 @@ export default defineEventHandler(async event => {
           meta: validatedBody.meta,
           duration: parseInt(validatedBody.duration),
           watched: parseInt(validatedBody.watched),
-          updatedAt: defaultAndCoerceDateTime(validatedBody.updatedAt),
+          updatedAt: now,
         };
       }
 
-      const now = defaultAndCoerceDateTime(validatedBody.updatedAt);
-
-      const existingItem = await prisma.progress_items.findUnique({
-        where: {
-          tmdb_id_user_id_season_id_episode_id: {
-            tmdb_id: tmdbId,
-            user_id: userId,
-            season_id: validatedBody.seasonId || null,
-            episode_id: validatedBody.episodeId || null,
-          },
-        },
-      });
+      const existingItem = await query(
+        `
+        SELECT *
+        FROM progress_items
+        WHERE user_id = $1 AND tmdb_id = $2 AND season_id IS DISTINCT FROM $3 AND episode_id IS DISTINCT FROM $4
+        `,
+        [userId, tmdbId, validatedBody.seasonId || null, validatedBody.episodeId || null]
+      );
 
       let progressItem;
-
-      if (existingItem) {
-        progressItem = await prisma.progress_items.update({
-          where: {
-            id: existingItem.id,
-          },
-          data: {
-            duration: BigInt(validatedBody.duration),
-            watched: BigInt(validatedBody.watched),
-            meta: validatedBody.meta,
-            updated_at: now,
-          },
-        });
+      if (existingItem.rows.length) {
+        const id = existingItem.rows[0].id;
+        await query(
+          `
+          UPDATE progress_items
+          SET duration = $1, watched = $2, meta = $3, updated_at = $4
+          WHERE id = $5
+          `,
+          [
+            BigInt(validatedBody.duration),
+            BigInt(validatedBody.watched),
+            validatedBody.meta,
+            now,
+            id,
+          ]
+        );
+        progressItem = { ...existingItem.rows[0], ...validatedBody, updated_at: now };
       } else {
-        progressItem = await prisma.progress_items.create({
-          data: {
-            id: randomUUID(),
-            tmdb_id: tmdbId,
-            user_id: userId,
-            season_id: validatedBody.seasonId || null,
-            episode_id: validatedBody.episodeId || null,
-            season_number: validatedBody.seasonNumber || null,
-            episode_number: validatedBody.episodeNumber || null,
-            duration: BigInt(validatedBody.duration),
-            watched: BigInt(validatedBody.watched),
-            meta: validatedBody.meta,
-            updated_at: now,
-          },
-        });
+        const id = randomUUID();
+        await query(
+          `
+          INSERT INTO progress_items (id, user_id, tmdb_id, season_id, episode_id, season_number, episode_number, duration, watched, meta, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          `,
+          [
+            id,
+            userId,
+            tmdbId,
+            validatedBody.seasonId || null,
+            validatedBody.episodeId || null,
+            validatedBody.seasonNumber || null,
+            validatedBody.episodeNumber || null,
+            BigInt(validatedBody.duration),
+            BigInt(validatedBody.watched),
+            validatedBody.meta,
+            now,
+          ]
+        );
+        progressItem = { id, ...validatedBody, updated_at: now };
       }
 
       return {
         id: progressItem.id,
-        tmdbId: progressItem.tmdb_id,
-        userId: progressItem.user_id,
-        seasonId: progressItem.season_id,
-        episodeId: progressItem.episode_id,
-        seasonNumber: progressItem.season_number,
-        episodeNumber: progressItem.episode_number,
+        tmdbId,
+        userId,
+        seasonId: progressItem.seasonId,
+        episodeId: progressItem.episodeId,
+        seasonNumber: progressItem.seasonNumber,
+        episodeNumber: progressItem.episodeNumber,
         meta: progressItem.meta,
-        duration: Number(progressItem.duration),
-        watched: Number(progressItem.watched),
+        duration: parseInt(progressItem.duration),
+        watched: parseInt(progressItem.watched),
         updatedAt: progressItem.updated_at,
       };
     }
 
     if (method === 'DELETE') {
       const body = await readBody(event).catch(() => ({}));
+      const conditions: any[] = [userId, tmdbId];
+      let whereSQL = 'user_id = $1 AND tmdb_id = $2';
+      let paramIndex = 3;
 
-      const whereClause: any = {
-        user_id: userId,
-        tmdb_id: tmdbId,
-      };
-
-      if (body.seasonId) whereClause.season_id = body.seasonId;
-      if (body.episodeId) whereClause.episode_id = body.episodeId;
-
-      const itemsToDelete = await prisma.progress_items.findMany({
-        where: whereClause,
-      });
-
-      if (itemsToDelete.length === 0) {
-        return {
-          count: 0,
-          tmdbId,
-          episodeId: body.episodeId,
-          seasonId: body.seasonId,
-        };
+      if (body.seasonId) {
+        whereSQL += ` AND season_id = $${paramIndex++}`;
+        conditions.push(body.seasonId);
+      }
+      if (body.episodeId) {
+        whereSQL += ` AND episode_id = $${paramIndex++}`;
+        conditions.push(body.episodeId);
       }
 
-      await prisma.progress_items.deleteMany({
-        where: whereClause,
-      });
+      const itemsToDelete = await query(`SELECT id FROM progress_items WHERE ${whereSQL}`, conditions);
+
+      if (!itemsToDelete.rows.length) {
+        return { count: 0, tmdbId, episodeId: body.episodeId, seasonId: body.seasonId };
+      }
+
+      await query(`DELETE FROM progress_items WHERE ${whereSQL}`, conditions);
 
       return {
-        count: itemsToDelete.length,
+        count: itemsToDelete.rows.length,
         tmdbId,
         episodeId: body.episodeId,
         seasonId: body.seasonId,
@@ -340,8 +297,5 @@ export default defineEventHandler(async event => {
     }
   }
 
-  throw createError({
-    statusCode: 405,
-    message: 'Method not allowed',
-  });
+  throw createError({ statusCode: 405, message: 'Method not allowed' });
 });

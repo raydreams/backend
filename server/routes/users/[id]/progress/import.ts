@@ -2,6 +2,7 @@ import { useAuth } from '~/utils/auth';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { scopedLogger } from '~/utils/logger';
+import { query } from '~/utils/prisma';
 
 const log = scopedLogger('progress-import');
 
@@ -15,14 +16,8 @@ const progressMetaSchema = z.object({
 const progressItemSchema = z.object({
   meta: progressMetaSchema,
   tmdbId: z.string().transform(val => val || randomUUID()),
-  duration: z
-    .number()
-    .min(0)
-    .transform(n => Math.round(n)),
-  watched: z
-    .number()
-    .min(0)
-    .transform(n => Math.round(n)),
+  duration: z.number().min(0).transform(n => Math.round(n)),
+  watched: z.number().min(0).transform(n => Math.round(n)),
   seasonId: z.string().optional(),
   episodeId: z.string().optional(),
   seasonNumber: z.number().optional(),
@@ -32,7 +27,6 @@ const progressItemSchema = z.object({
 
 // 13th July 2021 - movie-web epoch
 const minEpoch = 1626134400000;
-
 function defaultAndCoerceDateTime(dateTime: string | undefined) {
   const epoch = dateTime ? new Date(dateTime).getTime() : Date.now();
   const clampedEpoch = Math.max(minEpoch, Math.min(epoch, Date.now()));
@@ -43,43 +37,27 @@ export default defineEventHandler(async event => {
   const userId = event.context.params?.id;
 
   const session = await useAuth().getCurrentSession();
-
   if (session.user !== userId) {
-    throw createError({
-      statusCode: 403,
-      message: 'Cannot modify user other than yourself',
-    });
-  }
-
-  // First check if user exists
-  const user = await prisma.users.findUnique({
-    where: { id: userId },
-  });
-
-  if (!user) {
-    throw createError({
-      statusCode: 404,
-      message: 'User not found',
-    });
+    throw createError({ statusCode: 403, message: 'Cannot modify user other than yourself' });
   }
 
   if (event.method !== 'PUT') {
-    throw createError({
-      statusCode: 405,
-      message: 'Method not allowed',
-    });
+    throw createError({ statusCode: 405, message: 'Method not allowed' });
   }
 
   try {
     const body = await readBody(event);
     const validatedBody = z.array(progressItemSchema).parse(body);
 
-    const existingItems = await prisma.progress_items.findMany({
-      where: { user_id: userId },
-    });
+    // Fetch existing items from DB
+    const existingItemsRes = await query(
+      'SELECT * FROM progress_items WHERE user_id=$1',
+      [userId]
+    );
+    const existingItems = existingItemsRes.rows;
 
     const newItems = [...validatedBody];
-    const itemsToUpsert = [];
+    const itemsToUpsert: any[] = [];
 
     for (const existingItem of existingItems) {
       const newItemIndex = newItems.findIndex(
@@ -91,7 +69,6 @@ export default defineEventHandler(async event => {
 
       if (newItemIndex > -1) {
         const newItem = newItems[newItemIndex];
-
         if (Number(existingItem.watched) < newItem.watched) {
           const isMovie = newItem.meta.type === 'movie';
           itemsToUpsert.push({
@@ -108,12 +85,11 @@ export default defineEventHandler(async event => {
             updated_at: defaultAndCoerceDateTime(newItem.updatedAt),
           });
         }
-
         newItems.splice(newItemIndex, 1);
       }
     }
 
-    // Create new items
+    // New items to insert
     for (const item of newItems) {
       const isMovie = item.meta.type === 'movie';
       itemsToUpsert.push({
@@ -131,43 +107,57 @@ export default defineEventHandler(async event => {
       });
     }
 
-    // Upsert all items
     const results = [];
     for (const item of itemsToUpsert) {
       try {
-        const result = await prisma.progress_items.upsert({
-          where: {
-            tmdb_id_user_id_season_id_episode_id: {
-              tmdb_id: item.tmdb_id,
-              user_id: item.user_id,
-              season_id: item.season_id,
-              episode_id: item.episode_id,
-            },
-          },
-          create: item,
-          update: {
-            duration: item.duration,
-            watched: item.watched,
-            meta: item.meta,
-            updated_at: item.updated_at,
-          },
-        });
+        // Upsert logic using raw query
+        const existingRes = await query(
+          `SELECT id FROM progress_items 
+           WHERE tmdb_id=$1 AND user_id=$2 AND COALESCE(season_id,'')=$3 AND COALESCE(episode_id,'')=$4`,
+          [item.tmdb_id, item.user_id, item.season_id || '', item.episode_id || '']
+        );
+
+        let row;
+        if (existingRes.rowCount > 0) {
+          const updateRes = await query(
+            `UPDATE progress_items 
+             SET duration=$1, watched=$2, meta=$3::jsonb, updated_at=$4
+             WHERE id=$5 RETURNING *`,
+            [item.duration, item.watched, JSON.stringify(item.meta), item.updated_at.toISOString(), existingRes.rows[0].id]
+          );
+          row = updateRes.rows[0];
+        } else {
+          const insertRes = await query(
+            `INSERT INTO progress_items
+             (id, tmdb_id, user_id, season_id, episode_id, season_number, episode_number, duration, watched, meta, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)
+             RETURNING *`,
+            [
+              item.id,
+              item.tmdb_id,
+              item.user_id,
+              item.season_id,
+              item.episode_id,
+              item.season_number,
+              item.episode_number,
+              item.duration,
+              item.watched,
+              JSON.stringify(item.meta),
+              item.updated_at.toISOString(),
+            ]
+          );
+          row = insertRes.rows[0];
+        }
 
         results.push({
-          id: result.id,
-          tmdbId: result.tmdb_id,
-          episode: {
-            id: result.episode_id === '\n' ? null : result.episode_id,
-            number: result.episode_number,
-          },
-          season: {
-            id: result.season_id === '\n' ? null : result.season_id,
-            number: result.season_number,
-          },
-          meta: result.meta,
-          duration: result.duration.toString(),
-          watched: result.watched.toString(),
-          updatedAt: result.updated_at.toISOString(),
+          id: row.id,
+          tmdbId: row.tmdb_id,
+          episode: { id: row.episode_id === '\n' ? null : row.episode_id, number: row.episode_number },
+          season: { id: row.season_id === '\n' ? null : row.season_id, number: row.season_number },
+          meta: row.meta,
+          duration: row.duration.toString(),
+          watched: row.watched.toString(),
+          updatedAt: new Date(row.updated_at).toISOString(),
         });
       } catch (error) {
         log.error('Failed to upsert progress item', {
@@ -187,11 +177,7 @@ export default defineEventHandler(async event => {
     });
 
     if (error instanceof z.ZodError) {
-      throw createError({
-        statusCode: 400,
-        message: 'Invalid progress data',
-        cause: error.errors,
-      });
+      throw createError({ statusCode: 400, message: 'Invalid progress data', cause: error.errors });
     }
 
     throw createError({

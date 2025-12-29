@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { useChallenge } from '~/utils/challenge';
+import { query } from '~/utils/prisma';
 
 const startSchema = z.object({
   publicKey: z.string(),
@@ -14,8 +15,8 @@ export default defineEventHandler(async event => {
   }
 
   const body = await readBody(event);
-
   const result = startSchema.safeParse(body);
+
   if (!result.success) {
     throw createError({
       statusCode: 400,
@@ -23,19 +24,29 @@ export default defineEventHandler(async event => {
     });
   }
 
-  const user = await prisma.users.findUnique({
-    where: { public_key: body.publicKey },
-  });
+  /** ─────────────────────────────
+   *  Find user by public key
+   *  ───────────────────────────── */
+  const res = await query(
+    `SELECT id FROM users WHERE public_key = $1 LIMIT 1`,
+    [body.publicKey]
+  );
 
-  if (!user) {
+  if (res.rows.length === 0) {
     throw createError({
       statusCode: 401,
       message: 'User cannot be found',
     });
   }
 
+  /** ─────────────────────────────
+   *  Create challenge
+   *  ───────────────────────────── */
   const challenge = useChallenge();
-  const challengeCode = await challenge.createChallengeCode('login', 'mnemonic');
+  const challengeCode = await challenge.createChallengeCode(
+    'login',
+    'mnemonic'
+  );
 
   return {
     challenge: challengeCode.code,

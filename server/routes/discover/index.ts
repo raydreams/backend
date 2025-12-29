@@ -1,29 +1,36 @@
 import { TMDB } from 'tmdb-ts';
-const tmdb = new TMDB(useRuntimeConfig().tmdbApiKey);
 import { trakt } from '#imports';
+
+const tmdb = new TMDB(useRuntimeConfig().tmdbApiKey);
 
 export default defineCachedEventHandler(
   async event => {
+    const traktClient = trakt.current; // 🔥 THIS FIXES EVERYTHING
+
     const popular = { movies: [], shows: [] };
+
     popular.movies.push(
       ...(data => (data.results.sort((a, b) => b.vote_average - a.vote_average), data.results))(
         await tmdb.movies.popular()
       )
-    ); // Sorts by vote average
+    );
+
     popular.shows.push(
       ...(data => (data.results.sort((a, b) => b.vote_average - a.vote_average), data.results))(
         await tmdb.tvShows.popular()
       )
-    ); // Sorts by vote average
+    );
 
     const genres = {
       movies: await tmdb.genres.movies(),
       shows: await tmdb.genres.tvShows(),
     };
+
     const topRated = {
       movies: await tmdb.movies.topRated(),
       shows: await tmdb.tvShows.topRated(),
     };
+
     const nowPlaying = {
       movies: (await tmdb.movies.nowPlaying()).results.sort(
         (a, b) => b.vote_average - a.vote_average
@@ -32,82 +39,79 @@ export default defineCachedEventHandler(
         (a, b) => b.vote_average - a.vote_average
       ),
     };
-    let lists = [];
+
+    let lists: any[] = [];
 
     const internalLists = {
-      trending: await trakt.lists.trending(),
-      popular: await trakt.lists.popular(),
+      trending: await traktClient.lists.trending(),
+      popular: await traktClient.lists.popular(),
     };
 
-    for (let list = 0; list < internalLists.trending.length; list++) {
-      const items = await trakt.lists.items({
-        id: internalLists.trending[list].list.ids.trakt,
+    for (let i = 0; i < internalLists.trending.length; i++) {
+      const items = await traktClient.lists.items({
+        id: internalLists.trending[i].list.ids.trakt,
         type: 'all',
       });
+
       lists.push({
-        name: internalLists.trending[list].list.name,
-        likes: internalLists.trending[list].like_count,
+        name: internalLists.trending[i].list.name,
+        likes: internalLists.trending[i].like_count,
         items: [],
       });
-      for (let item = 0; item < items.length; item++) {
-        switch (true) {
-          case !!items[item].movie?.ids?.tmdb:
-            lists[list].items.push({
-              type: 'movie',
-              name: items[item].movie.title,
-              id: items[item].movie.ids.tmdb,
-              year: items[item].movie.year,
-            });
-            break;
-          case !!items[item].show?.ids?.tmdb:
-            lists[list].items.push({
-              type: 'show',
-              name: items[item].show.title,
-              id: items[item].show.ids.tmdb,
-              year: items[item].show.year,
-            });
-            break;
+
+      for (const item of items) {
+        if (item.movie?.ids?.tmdb) {
+          lists[i].items.push({
+            type: 'movie',
+            name: item.movie.title,
+            id: item.movie.ids.tmdb,
+            year: item.movie.year,
+          });
+        } else if (item.show?.ids?.tmdb) {
+          lists[i].items.push({
+            type: 'show',
+            name: item.show.title,
+            id: item.show.ids.tmdb,
+            year: item.show.year,
+          });
         }
       }
     }
 
-    for (let list = 0; list < internalLists.popular.length; list++) {
-      const items = await trakt.lists.items({
-        id: internalLists.popular[list].list.ids.trakt,
+    for (let i = 0; i < internalLists.popular.length; i++) {
+      const items = await traktClient.lists.items({
+        id: internalLists.popular[i].list.ids.trakt,
         type: 'all',
       });
+
       lists.push({
-        name: internalLists.popular[list].list.name,
-        likes: internalLists.popular[list].like_count,
+        name: internalLists.popular[i].list.name,
+        likes: internalLists.popular[i].like_count,
         items: [],
       });
-      for (let item = 0; item < items.length; item++) {
-        switch (true) {
-          case !!items[item].movie?.ids?.tmdb:
-            lists[lists.length - 1].items.push({
-              type: 'movie',
-              name: items[item].movie.title,
-              id: items[item].movie.ids.tmdb,
-              year: items[item].movie.year,
-            });
-            break;
-          case !!items[item].show?.ids?.tmdb:
-            lists[lists.length - 1].items.push({
-              type: 'show',
-              name: items[item].show.title,
-              id: items[item].show.ids.tmdb,
-              year: items[item].show.year,
-            });
-            break;
+
+      for (const item of items) {
+        if (item.movie?.ids?.tmdb) {
+          lists.at(-1)!.items.push({
+            type: 'movie',
+            name: item.movie.title,
+            id: item.movie.ids.tmdb,
+            year: item.movie.year,
+          });
+        } else if (item.show?.ids?.tmdb) {
+          lists.at(-1)!.items.push({
+            type: 'show',
+            name: item.show.title,
+            id: item.show.ids.tmdb,
+            year: item.show.year,
+          });
         }
       }
     }
-    const trending = await trakt.movies.popular();
 
-    // most watched films
-    const mostWatched = await trakt.movies.watched();
-    // takes the highest grossing box office film in the last weekend
-    const lastWeekend = await trakt.movies.boxoffice();
+    const trending = await traktClient.movies.popular();
+    const mostWatched = await traktClient.movies.watched();
+    const lastWeekend = await traktClient.movies.boxoffice();
 
     return {
       mostWatched,
@@ -121,6 +125,6 @@ export default defineCachedEventHandler(
     };
   },
   {
-    maxAge: process.env.NODE_ENV === 'production' ? 60 * 60 : 0, // 20 Minutes for prod, no cache for dev. Customize to your liking
+    maxAge: process.env.NODE_ENV === 'production' ? 60 * 60 : 0,
   }
 );

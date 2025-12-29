@@ -1,35 +1,5 @@
 import { useAuth } from '~/utils/auth';
-import { z } from 'zod';
-import { randomUUID } from 'crypto';
-
-const watchHistoryMetaSchema = z.object({
-  title: z.string(),
-  year: z.number().optional(),
-  poster: z.string().optional(),
-  type: z.enum(['movie', 'show']),
-});
-
-const watchHistoryItemSchema = z.object({
-  meta: watchHistoryMetaSchema,
-  tmdbId: z.string(),
-  duration: z.number().transform(n => n.toString()),
-  watched: z.number().transform(n => n.toString()),
-  watchedAt: z.string().datetime({ offset: true }),
-  completed: z.boolean().optional().default(false),
-  seasonId: z.string().optional(),
-  episodeId: z.string().optional(),
-  seasonNumber: z.number().optional(),
-  episodeNumber: z.number().optional(),
-});
-
-// 13th July 2021 - movie-web epoch
-const minEpoch = 1626134400000;
-
-function defaultAndCoerceDateTime(dateTime: string | undefined) {
-  const epoch = dateTime ? new Date(dateTime).getTime() : Date.now();
-  const clampedEpoch = Math.max(minEpoch, Math.min(epoch, Date.now()));
-  return new Date(clampedEpoch);
-}
+import { query } from '~/utils/prisma';
 
 export default defineEventHandler(async event => {
   const userId = event.context.params?.id;
@@ -51,12 +21,18 @@ export default defineEventHandler(async event => {
   }
 
   if (method === 'GET') {
-    const items = await prisma.watch_history.findMany({
-      where: { user_id: userId },
-      orderBy: { watched_at: 'desc' },
-    });
+    const result = await query(
+      `
+      SELECT *
+      FROM watch_history
+      WHERE user_id = $1
+      ORDER BY watched_at DESC
+      `,
+      [userId]
+    );
 
-    return items.map(item => ({
+    // Use result.rows instead of result
+    return result.rows.map(item => ({
       id: item.id,
       tmdbId: item.tmdb_id,
       episode: {
