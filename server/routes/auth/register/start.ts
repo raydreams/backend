@@ -6,7 +6,11 @@ const startSchema = z.object({
   captchaToken: z.string().optional(),
 });
 
-const allowedOrigins = ['https://pstream.mov'];
+// Allowed origins (production + local testing)
+const allowedOrigins = [
+  'https://pstream.mov',   // production
+  'http://localhost:3000'  // local dev
+];
 
 export default defineEventHandler(async (event: H3Event) => {
   const origin = event.req.headers.origin;
@@ -25,26 +29,27 @@ export default defineEventHandler(async (event: H3Event) => {
     'Content-Type, Authorization'
   );
 
-  // Handle preflight
+  // Handle preflight OPTIONS
   if (event.req.method === 'OPTIONS') {
     event.res.statusCode = 204;
     return '';
   }
 
   try {
+    // Only POST allowed
     if (event.req.method !== 'POST') {
       event.res.statusCode = 405;
       return { error: true, message: 'HTTP method not allowed. Use POST.' };
     }
 
+    // Read and validate body
     const body = await readBody(event);
     const result = startSchema.safeParse(body);
     if (!result.success) {
       event.res.statusCode = 400;
       return {
         error: true,
-        message:
-          'Invalid request body. Send JSON like { "captchaToken": "..." }',
+        message: 'Invalid request body. Send JSON like { "captchaToken": "..." }',
       };
     }
 
@@ -63,10 +68,7 @@ export default defineEventHandler(async (event: H3Event) => {
     // Create challenge code
     let challengeCode;
     try {
-      challengeCode = await challenge.createChallengeCode(
-        'registration',
-        'mnemonic'
-      );
+      challengeCode = await challenge.createChallengeCode('registration', 'mnemonic');
       console.log('Challenge created:', challengeCode);
     } catch (err) {
       console.error('createChallengeCode() failed:', err);
