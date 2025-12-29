@@ -1,15 +1,15 @@
 import { z } from 'zod';
 import { useChallenge } from '~/utils/challenge';
-import { H3Event } from 'h3';
+import { H3Event, createError, readBody } from 'h3';
 
 const startSchema = z.object({
   captchaToken: z.string().optional(),
 });
 
 export default defineEventHandler(async (event: H3Event) => {
-  // Always add CORS headers first
   const origin = event.req.headers.origin;
-  if (origin) {
+  const allowedOrigins = ['https://pstream.mov'];
+  if (origin && allowedOrigins.includes(origin)) {
     event.res.setHeader('Access-Control-Allow-Origin', origin);
   }
   event.res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -22,13 +22,11 @@ export default defineEventHandler(async (event: H3Event) => {
     'Content-Type, Authorization'
   );
 
-  // Handle preflight
   if (event.req.method === 'OPTIONS') {
     event.res.statusCode = 204;
     return '';
   }
 
-  // Only allow POST
   if (event.req.method !== 'POST') {
     throw createError({
       statusCode: 405,
@@ -42,7 +40,7 @@ export default defineEventHandler(async (event: H3Event) => {
   if (!result.success) {
     throw createError({
       statusCode: 400,
-      message: 'Invalid request body',
+      message: 'Invalid request body. Make sure to send JSON with { "captchaToken": "..." }',
     });
   }
 

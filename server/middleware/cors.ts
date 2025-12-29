@@ -1,7 +1,9 @@
 export default defineEventHandler(event => {
   const origin = getHeader(event, 'origin');
 
-  if (origin) {
+  // Only allow your frontend
+  const allowedOrigins = ['https://pstream.mov'];
+  if (origin && allowedOrigins.includes(origin)) {
     setHeader(event, 'Access-Control-Allow-Origin', origin);
   }
 
@@ -17,6 +19,7 @@ export default defineEventHandler(event => {
     'Content-Type, Authorization'
   );
 
+  // Handle preflight requests
   if (event.method === 'OPTIONS') {
     event.node.res.statusCode = 204;
     return '';
