@@ -6,16 +6,14 @@ const startSchema = z.object({
   captchaToken: z.string().optional(),
 });
 
-// Allowed origins (production + local testing)
-const allowedOrigins = [
-  'https://pstream.mov',   // production
-  'http://localhost:3000'  // local dev
-];
-
 export default defineEventHandler(async (event: H3Event) => {
   const origin = event.req.headers.origin;
+  const allowedOrigins = [
+    'https://pstream.mov',
+    'http://localhost:3000'
+  ];
 
-  // === Always set CORS headers first ===
+  // === Always set CORS headers ===
   if (origin && allowedOrigins.includes(origin)) {
     event.res.setHeader('Access-Control-Allow-Origin', origin);
   }
@@ -29,20 +27,18 @@ export default defineEventHandler(async (event: H3Event) => {
     'Content-Type, Authorization'
   );
 
-  // Handle preflight OPTIONS
+  // Handle preflight (redundant but safe)
   if (event.req.method === 'OPTIONS') {
     event.res.statusCode = 204;
     return '';
   }
 
   try {
-    // Only POST allowed
     if (event.req.method !== 'POST') {
       event.res.statusCode = 405;
       return { error: true, message: 'HTTP method not allowed. Use POST.' };
     }
 
-    // Read and validate body
     const body = await readBody(event);
     const result = startSchema.safeParse(body);
     if (!result.success) {
